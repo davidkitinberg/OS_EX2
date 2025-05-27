@@ -73,7 +73,8 @@ int main(int argc, char* argv[]) {
     }
 
     // Main loop for sending commands
-    while (true) {
+    while (true) 
+    {
         std::string input;
         std::cout << "Enter command: ";
         std::getline(std::cin, input);
@@ -91,8 +92,10 @@ int main(int argc, char* argv[]) {
             }
 
             std::cout << "Server response:\n" << buffer << "\n";
-        } else {
-            // UDP
+        } 
+        else // UDP
+        {
+            
             sendto(sock, input.c_str(), input.size(), 0, res->ai_addr, res->ai_addrlen);
 
             char buffer[BUFFER_SIZE] = {0};
