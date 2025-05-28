@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <getopt.h>
 #include <set>
+#include <climits>
 
 #define MAX_CLIENTS 10 // Max number of TCP clients
 #define BUFFER_SIZE 1024 // Buffer size for messages
@@ -104,6 +105,31 @@ std::string handle_deliver(const std::string& cmd) {
     return "SUCCESS: Delivered " + std::to_string(count) + " " + molecule + "\n";
 }
 
+// Helper function to calculate max number of drinks from stock
+int get_max_possible(std::vector<std::string> required_molecules) {
+    std::map<std::string, unsigned long long> total_needed;
+
+    // Sum up total atoms required for all molecules that make up the drink
+    for (const std::string& mol : required_molecules) {
+        if (molecule_recipes.find(mol) == molecule_recipes.end()) {
+            std::cerr << "ERROR: Unknown molecule in GEN command: " << mol << std::endl;
+            return 0;
+        }
+        for (const auto& [atom, count] : molecule_recipes[mol]) {
+            total_needed[atom] += count;
+        }
+    }
+
+    // Calculate how many drinks can be made based on current atom_stock
+    unsigned long long max_drinks = ULLONG_MAX;
+    for (const auto& [atom, needed_per_drink] : total_needed) {
+        if (atom_stock.find(atom) == atom_stock.end() || needed_per_drink == 0) return 0;
+        max_drinks = std::min(max_drinks, atom_stock[atom] / needed_per_drink);
+    }
+
+    return static_cast<int>(max_drinks);
+}
+
 int main(int argc, char* argv[]) {
     // Socket and control variables
     int tcp_fd, udp_fd, new_socket, activity, valread, sd, max_sd;
@@ -133,7 +159,6 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: Port is required.\n";
         return 1;
     }
-
 
     // Set of sockets for select()
     fd_set readfds;
@@ -166,7 +191,8 @@ int main(int argc, char* argv[]) {
         FD_ZERO(&readfds); // Clear and prepare file descriptor set
         FD_SET(tcp_fd, &readfds); // Add TCP fd to the readfds
         FD_SET(udp_fd, &readfds); // Add UDP fd to the readfds
-        max_sd = std::max(tcp_fd, udp_fd); // Max fd number
+        FD_SET(STDIN_FILENO, &readfds); // <<< Add console input (keyboard)
+        max_sd = std::max(std::max(tcp_fd, udp_fd), STDIN_FILENO); // <<< Initial max_sd
 
         // Add active TCP sockets to the fd set
         for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -175,11 +201,38 @@ int main(int argc, char* argv[]) {
             if (sd > max_sd) max_sd = sd;
         }
 
-        // Wait for activity (TCP or UDP or client)
+        // Wait for activity (TCP or UDP or client or console)
         activity = select(max_sd + 1, &readfds, NULL, NULL, NULL);
         if (activity < 0) {
             perror("select error");
             continue;
+        }
+
+        // Handle console input
+        if (FD_ISSET(STDIN_FILENO, &readfds)) // <<< Check if there is input from terminal
+        {
+            std::string input;
+            std::getline(std::cin, input); // Read entire line
+
+            if (input == "GEN SOFT DRINK") 
+            {
+                int count = get_max_possible({"WATER", "CARBON DIOXIDE"});
+                std::cout << "Can make " << count << " SOFT DRINK(s)" << std::endl;
+            } 
+            else if (input == "GEN VODKA") 
+            {
+                int count = get_max_possible({"WATER", "CARBON DIOXIDE", "ALCOHOL"});
+                std::cout << "Can make " << count << " VODKA(s)" << std::endl;
+            } 
+            else if (input == "GEN CHAMPAGNE") 
+            {
+                int count = get_max_possible({"WATER", "CARBON DIOXIDE", "ALCOHOL", "GLUCOSE"});
+                std::cout << "Can make " << count << " CHAMPAGNE(s)" << std::endl;
+            } 
+            else 
+            {
+                std::cout << "Unknown command: " << input << std::endl;
+            }
         }
 
         // Handle new TCP connection
@@ -212,14 +265,14 @@ int main(int argc, char* argv[]) {
             memset(buffer, 0, BUFFER_SIZE); // Clears the buffer
             // Reads a UDP datagram from the socket into buffer
             int n = recvfrom(udp_fd, buffer, BUFFER_SIZE, 0, (struct sockaddr*)&client_addr, &client_len);
-            if (n > 0) // If we recieved a message
+            if (n > 0) // If we received a message
             {
                 // Track new UDP client
                 char client_ip[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN); // Converts the client's IP to string
                 int client_port = ntohs(client_addr.sin_port);
                 std::string client_id = std::string(client_ip) + ":" + std::to_string(client_port); // Constructs a unique ID for the client
-                if (known_udp_clients.find(client_id) == known_udp_clients.end()) // If its a new client, log the connection
+                if (known_udp_clients.find(client_id) == known_udp_clients.end()) // If it's a new client, log the connection
                 {
                     known_udp_clients.insert(client_id);
                     std::cout << "New connection, socket fd is UDP from " << client_id << std::endl;
@@ -271,10 +324,6 @@ int main(int argc, char* argv[]) {
                 sendto(udp_fd, response.c_str(), response.size(), 0, (struct sockaddr*)&client_addr, client_len);
             }
         }
-
-
-
-
 
         // Handle existing TCP clients' messages
         for (int i = 0; i < MAX_CLIENTS; i++) // Loop over the connected TCP clients
