@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 #include <sstream>
 #include <unistd.h>
+#include <algorithm>
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <arpa/inet.h>
@@ -32,56 +33,59 @@ std::map<std::string, std::map<std::string, int>> molecule_recipes = {
     {"GLUCOSE", {{"CARBON", 6}, {"HYDROGEN", 12}, {"OXYGEN", 6}}}
 };
 
-// Handle ADD command over TCP
-void handle_add(const std::string& cmd, int client_socket) {
-    std::string response;
+
+// Handle ADD command over TCP && UDP
+std::string process_add_command(const std::string& cmd) {
     std::istringstream iss(cmd);
     std::string action, atom;
     unsigned long long amount;
+    std::string response;
 
     // Parse input: expecting ADD <ATOM> <AMOUNT>
     iss >> action >> atom;
     if (!(iss >> amount)) {
-        response = "ERROR: Missing or invalid amount\n";
-        send(client_socket, response.c_str(), response.size(), 0);
-        return;
+        return "ERROR: Missing or invalid amount\n";
     }
 
     // Check if atom type exists and apply the add logic
-    if (action == "ADD" && atom_stock.find(atom) != atom_stock.end()) 
+    if (action != "ADD" || atom_stock.find(atom) == atom_stock.end()) 
     {
-        if (atom_stock[atom] + amount > MAX_STORAGE) // Check for storage limit
-        {
-            response = "ERROR: Storage limit exceeded (max 10^18)\n";
-        } 
-        else 
-        {
-            atom_stock[atom] += amount; // Update amount
-            response = "Updated stock:\n";
-            for (const auto& [key, val] : atom_stock) { // Print the inventory
-                response += key + ": " + std::to_string(val) + "\n";
-            }
-        }
-    }
-    else // Invalid command
-    {
-        response = "ERROR: Unknown command or atom type\n";
+        return "ERROR: Unknown command or atom type\n";
     }
 
-    // Send back response to TCP client
-    send(client_socket, response.c_str(), response.size(), 0);
+    if (atom_stock[atom] + amount > MAX_STORAGE) // Check for storage limit
+    {
+        return "ERROR: Storage limit exceeded (max 10^18)\n";
+    }
+
+    atom_stock[atom] += amount; // Update amount
+    response = "Updated stock:\n";
+    for (const auto& [key, val] : atom_stock) { // Print the inventory
+        response += key + ": " + std::to_string(val) + "\n";
+    }
+
+    return response;
 }
+
 
 // Handle DELIVER command (for both TCP & UDP)
 std::string handle_deliver(const std::string& cmd) {
     std::istringstream iss(cmd);
-    std::string action, molecule;
-    int count;
+    std::string action, molecule, part;
+    int count = -1;
 
     // Parse input: expecting DELIVER <MOLECULE> <AMOUNT>
-    iss >> action >> std::ws;
-    std::getline(iss, molecule, ' ');
-    iss >> count;
+    iss >> action;
+
+    while (iss >> part) 
+    {
+        if (std::all_of(part.begin(), part.end(), ::isdigit)) {
+            count = std::stoi(part);
+            break;
+        }
+        if (!molecule.empty()) molecule += " ";
+        molecule += part;
+    }
 
     // Validate the input format and that the molecule exists
     if (action != "DELIVER" || molecule_recipes.find(molecule) == molecule_recipes.end() || count <= 0) {
@@ -235,33 +239,8 @@ int main(int argc, char* argv[]) {
                 } 
                 else if (cmd.find("ADD") == 0) // If the request is ADD
                 {
-                    std::istringstream iss(cmd);
-                    std::string action, atom;
-                    unsigned long long amount;
-                    iss >> action >> atom; // Split the request
-                    if (!(iss >> amount)) // If the amount is not a valid number
-                    {
-                        response = "ERROR: Missing or invalid amount\n";
-                    } 
-                    else if (atom_stock.find(atom) == atom_stock.end()) // If the atom type isn’t known
-                    {
-                        response = "ERROR: Unknown command or atom type\n";
-                    } 
-                    else if (atom_stock[atom] + amount > MAX_STORAGE) // If the new amount of the atom exceeds the limit (10^18)
-                    {
-                        response = "ERROR: Storage limit exceeded (max 10^18)\n";
-                    } 
-                    else // If all checks pass
-                    {
-                        atom_stock[atom] += amount; // Update atom stock
-                        response = "Updated stock:\n";
-                        // Construct response
-                        for (const auto& [key, val] : atom_stock) 
-                        {
-                            response += key + ": " + std::to_string(val) + "\n";
-                        }
-                    }
-                } 
+                    response = process_add_command(cmd);
+                }
                 else // Generic error
                 {
                     response = "ERROR: Unsupported command\n";
@@ -298,9 +277,9 @@ int main(int argc, char* argv[]) {
                     // Determine command type and handle it
                     if (cmd.find("DELIVER") == 0) {
                         response = handle_deliver(cmd); // Send to handle deliver
-                    } else {
-                        handle_add(cmd, sd); // Send to handle add
-                        continue;
+                    } else if (cmd.find("ADD") == 0)
+                    {
+                        response = process_add_command(cmd);
                     }
 
                     // Send TCP response

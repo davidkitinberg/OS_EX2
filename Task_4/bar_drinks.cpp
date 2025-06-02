@@ -9,7 +9,9 @@
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <arpa/inet.h>
+#include <algorithm>
 #include <cstdlib>
+#include <csignal>
 #include <getopt.h>
 #include <set>
 #include <climits>
@@ -75,13 +77,21 @@ std::string process_add_command(const std::string& cmd) {
 // Handle DELIVER command (for both TCP & UDP)
 std::string handle_deliver(const std::string& cmd) {
     std::istringstream iss(cmd);
-    std::string action, molecule;
-    int count;
+    std::string action, molecule, part;
+    int count = -1;
 
     // Parse input: expecting DELIVER <MOLECULE> <AMOUNT>
-    iss >> action >> std::ws;
-    std::getline(iss, molecule, ' ');
-    iss >> count;
+    iss >> action;
+
+    while (iss >> part) 
+    {
+        if (std::all_of(part.begin(), part.end(), ::isdigit)) {
+            count = std::stoi(part);
+            break;
+        }
+        if (!molecule.empty()) molecule += " ";
+        molecule += part;
+    }
 
     // Validate the input format and that the molecule exists
     if (action != "DELIVER" || molecule_recipes.find(molecule) == molecule_recipes.end() || count <= 0) {
@@ -131,11 +141,17 @@ int get_max_possible(std::vector<std::string> required_molecules) {
     return static_cast<int>(max_drinks);
 }
 
+// Alarm handler
+void handle_alarm(int sig) {
+    std::cout << "\nTimeout reached. Shutting down server...\n";
+    exit(0);
+}
+
 static struct option long_options[] = {
-    {"oxygen", optional_argument, 0, 'o'},
-    {"carbon", optional_argument, 0, 'c'},
-    {"hydrogen", optional_argument, 0, 'h'},
-    {"timeout", optional_argument, 0, 't'},
+    {"oxygen", required_argument, 0, 'o'},
+    {"carbon", required_argument, 0, 'c'},
+    {"hydrogen", required_argument, 0, 'h'},
+    {"timeout", required_argument, 0, 't'},
     {"tcp-port", required_argument, 0, 'T'},
     {"udp-port", required_argument, 0, 'U'},
     {0, 0, 0, 0}
@@ -157,7 +173,7 @@ int main(int argc, char* argv[]) {
     int opt;
     int tcp_port = -1; // UDP port number
     int udp_port = -1; // TCP port number
-    int timeout_seconds = 0; // Time out for any channel input on select
+    int timeout_seconds = -1; // Time out for any channel input on select
     while ((opt = getopt_long(argc, argv, "o:c:h:t:T:U:", long_options, NULL)) != -1) 
     {
         switch (opt) 
@@ -178,11 +194,6 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: --tcp-port and --udp-port are required\n";
         return 1;
     }
-
-    // if (port == -1) {
-    //     std::cerr << "Error: Port is required.\n";
-    //     return 1;
-    // }
 
     // We want to make STDIN non-blocking so it won't freeze the entire main loop of select
     int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
@@ -220,14 +231,20 @@ int main(int argc, char* argv[]) {
 
     std::cout << "bar_drinks started on TCP port: " << tcp_port << " && UDP port: " << udp_port << std::endl;
 
+    // Timeout handling
+    if (timeout_seconds > 0) {
+    signal(SIGALRM, handle_alarm); // Set handler
+    alarm(timeout_seconds);        // Start initial alarm
+    }
+
     while (true) 
     {
         // Clear and prepare file descriptor set
         FD_ZERO(&readfds); // Clear and prepare file descriptor set
         FD_SET(tcp_fd, &readfds); // Add TCP fd to the readfds
         FD_SET(udp_fd, &readfds); // Add UDP fd to the readfds
-        FD_SET(STDIN_FILENO, &readfds); // <<< Add console input (keyboard)
-        max_sd = std::max(std::max(tcp_fd, udp_fd), STDIN_FILENO); // <<< Initial max_sd
+        FD_SET(STDIN_FILENO, &readfds); // Add console input (keyboard)
+        max_sd = std::max(std::max(tcp_fd, udp_fd), STDIN_FILENO); // Initial max_sd
 
         // Add active TCP sockets to the fd set
         for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -246,6 +263,8 @@ int main(int argc, char* argv[]) {
         // Handle console input
         if (FD_ISSET(STDIN_FILENO, &readfds)) // Select detects activity in STDIN
         {
+            if (timeout_seconds > 0) alarm(timeout_seconds); // Reset timeout
+
             char tmp[256]; // Temporary buffer
             ssize_t numberOfBytes = ::read(STDIN_FILENO, tmp, sizeof(tmp)); // Number of bytes read by STDIN
             if (numberOfBytes > 0) {
@@ -297,6 +316,9 @@ int main(int argc, char* argv[]) {
         // Handle new TCP connection
         if (FD_ISSET(tcp_fd, &readfds)) // Checks whether the TCP socket (tcp_fd) is ready for reading
         {
+
+            if (timeout_seconds > 0) alarm(timeout_seconds); // Reset timeout
+
             struct sockaddr_in client_addr; // Struct to store the client's address
             socklen_t client_len = sizeof(client_addr); // Initialize client_len to the size of that struct
             new_socket = accept(tcp_fd, (struct sockaddr*)&client_addr, &client_len); // Accepts the incoming TCP connection
@@ -319,6 +341,9 @@ int main(int argc, char* argv[]) {
         // Handle new UDP message
         if (FD_ISSET(udp_fd, &readfds)) // Checks if the UDP socket has received a message
         {
+
+            if (timeout_seconds > 0) alarm(timeout_seconds); // Reset timeout
+
             struct sockaddr_in client_addr; // Prepare sockaddr_in struct to store the client's address info
             socklen_t client_len = sizeof(client_addr);
             memset(buffer, 0, BUFFER_SIZE); // Clears the buffer
@@ -362,6 +387,9 @@ int main(int argc, char* argv[]) {
         // Handle existing TCP clients' messages
         for (int i = 0; i < MAX_CLIENTS; i++) // Loop over the connected TCP clients
         {
+
+            if (timeout_seconds > 0) alarm(timeout_seconds); // Reset timeout
+
             sd = client_socket[i]; // Store the socket file descriptor of client i
             if (FD_ISSET(sd, &readfds)) // Check if this client’s socket has incoming data
             {

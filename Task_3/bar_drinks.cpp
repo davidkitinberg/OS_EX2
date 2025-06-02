@@ -1,10 +1,12 @@
 #include <iostream>
 #include <string>
+#include <vector>
 #include <cstring>
 #include <map>
 #include <netinet/in.h>
 #include <sstream>
 #include <unistd.h>
+#include <algorithm>
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <arpa/inet.h>
@@ -12,6 +14,7 @@
 #include <getopt.h>
 #include <set>
 #include <climits>
+#include <fcntl.h>
 
 #define MAX_CLIENTS 10 // Max number of TCP clients
 #define BUFFER_SIZE 1024 // Buffer size for messages
@@ -33,56 +36,61 @@ std::map<std::string, std::map<std::string, int>> molecule_recipes = {
     {"GLUCOSE", {{"CARBON", 6}, {"HYDROGEN", 12}, {"OXYGEN", 6}}}
 };
 
-// Handle ADD command over TCP
-void handle_add(const std::string& cmd, int client_socket) {
-    std::string response;
+
+
+// Handle ADD command over TCP && UDP
+std::string process_add_command(const std::string& cmd) {
     std::istringstream iss(cmd);
     std::string action, atom;
     unsigned long long amount;
+    std::string response;
 
     // Parse input: expecting ADD <ATOM> <AMOUNT>
     iss >> action >> atom;
     if (!(iss >> amount)) {
-        response = "ERROR: Missing or invalid amount\n";
-        send(client_socket, response.c_str(), response.size(), 0);
-        return;
+        return "ERROR: Missing or invalid amount\n";
     }
 
     // Check if atom type exists and apply the add logic
-    if (action == "ADD" && atom_stock.find(atom) != atom_stock.end()) 
+    if (action != "ADD" || atom_stock.find(atom) == atom_stock.end()) 
     {
-        if (atom_stock[atom] + amount > MAX_STORAGE) // Check for storage limit
-        {
-            response = "ERROR: Storage limit exceeded (max 10^18)\n";
-        } 
-        else 
-        {
-            atom_stock[atom] += amount; // Update amount
-            response = "Updated stock:\n";
-            for (const auto& [key, val] : atom_stock) { // Print the inventory
-                response += key + ": " + std::to_string(val) + "\n";
-            }
-        }
-    }
-    else // Invalid command
-    {
-        response = "ERROR: Unknown command or atom type\n";
+        return "ERROR: Unknown command or atom type\n";
     }
 
-    // Send back response to TCP client
-    send(client_socket, response.c_str(), response.size(), 0);
+    if (atom_stock[atom] + amount > MAX_STORAGE) // Check for storage limit
+    {
+        return "ERROR: Storage limit exceeded (max 10^18)\n";
+    }
+
+    atom_stock[atom] += amount; // Update amount
+    response = "Updated stock:\n";
+    for (const auto& [key, val] : atom_stock) { // Print the inventory
+        response += key + ": " + std::to_string(val) + "\n";
+    }
+
+    return response;
 }
+
+
 
 // Handle DELIVER command (for both TCP & UDP)
 std::string handle_deliver(const std::string& cmd) {
     std::istringstream iss(cmd);
-    std::string action, molecule;
-    int count;
+    std::string action, molecule, part;
+    int count = -1;
 
     // Parse input: expecting DELIVER <MOLECULE> <AMOUNT>
-    iss >> action >> std::ws;
-    std::getline(iss, molecule, ' ');
-    iss >> count;
+    iss >> action;
+
+    while (iss >> part) 
+    {
+        if (std::all_of(part.begin(), part.end(), ::isdigit)) {
+            count = std::stoi(part);
+            break;
+        }
+        if (!molecule.empty()) molecule += " ";
+        molecule += part;
+    }
 
     // Validate the input format and that the molecule exists
     if (action != "DELIVER" || molecule_recipes.find(molecule) == molecule_recipes.end() || count <= 0) {
@@ -104,6 +112,8 @@ std::string handle_deliver(const std::string& cmd) {
 
     return "SUCCESS: Delivered " + std::to_string(count) + " " + molecule + "\n";
 }
+
+
 
 // Helper function to calculate max number of drinks from stock
 int get_max_possible(std::vector<std::string> required_molecules) {
@@ -129,6 +139,9 @@ int get_max_possible(std::vector<std::string> required_molecules) {
 
     return static_cast<int>(max_drinks);
 }
+
+
+
 
 int main(int argc, char* argv[]) {
     // Socket and control variables
@@ -160,6 +173,11 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // We want to make STDIN non-blocking so it won't freeze the entire main loop of select
+    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK); // make stdin non-blocking
+    std::string stdin_buf; // Use a string buffer to accumulate stdin input
+
     // Set of sockets for select()
     fd_set readfds;
     int client_socket[MAX_CLIENTS] = {0}; // TCP client connections
@@ -183,7 +201,7 @@ int main(int argc, char* argv[]) {
     bind(udp_fd, (struct sockaddr*)&address, sizeof(address));
     listen(tcp_fd, 3); // Start TCP listener
 
-    std::cout << "molecule_supplier started on port " << port << std::endl;
+    std::cout << "bar_drinks started on port " << port << std::endl;
 
     while (true) 
     {
@@ -209,30 +227,54 @@ int main(int argc, char* argv[]) {
         }
 
         // Handle console input
-        if (FD_ISSET(STDIN_FILENO, &readfds)) // <<< Check if there is input from terminal
+        if (FD_ISSET(STDIN_FILENO, &readfds)) // Select detects activity in STDIN
         {
-            std::string input;
-            std::getline(std::cin, input); // Read entire line
+            char tmp[256]; // Temporary buffer
+            ssize_t numberOfBytes = ::read(STDIN_FILENO, tmp, sizeof(tmp)); // Number of bytes read by STDIN
+            if (numberOfBytes > 0) {
+                stdin_buf.append(tmp, numberOfBytes); // accumulate what we got
+                size_t nl; // Number of bytes of current new line
+                while ((nl = stdin_buf.find('\n')) != std::string::npos) // The loop runs as long as there’s at least one complete line in stdin_buf
+                {
+                    std::string line = stdin_buf.substr(0, nl); // Extract the full line
+                    stdin_buf.erase(0, nl + 1); // Removes the new line from the buffer
 
-            if (input == "GEN SOFT DRINK") 
-            {
-                int count = get_max_possible({"WATER", "CARBON DIOXIDE"});
-                std::cout << "Can make " << count << " SOFT DRINK(s)" << std::endl;
-            } 
-            else if (input == "GEN VODKA") 
-            {
-                int count = get_max_possible({"WATER", "CARBON DIOXIDE", "ALCOHOL"});
-                std::cout << "Can make " << count << " VODKA(s)" << std::endl;
-            } 
-            else if (input == "GEN CHAMPAGNE") 
-            {
-                int count = get_max_possible({"WATER", "CARBON DIOXIDE", "ALCOHOL", "GLUCOSE"});
-                std::cout << "Can make " << count << " CHAMPAGNE(s)" << std::endl;
-            } 
-            else 
-            {
-                std::cout << "Unknown command: " << input << std::endl;
+                    // Removes trailing spaces/carriage returns/tabs
+                    line.erase(line.find_last_not_of(" \r\t") + 1);
+
+                    // Handle the command - call get_max_possible with the correct recipe 
+                    if (line == "GEN SOFT DRINK") 
+                    {
+                        int c = get_max_possible({"WATER", "CARBON DIOXIDE", "GLUCOSE"});
+                        std::cout << "Can make " << c << " SOFT DRINK(s)\n";
+                    }
+                    else if (line == "GEN VODKA") 
+                    {
+                        int c = get_max_possible({"WATER", "GLUCOSE", "ALCOHOL"});
+                        std::cout << "Can make " << c << " VODKA(s)\n";
+                    }
+                    else if (line == "GEN CHAMPAGNE") 
+                    {
+                        int c = get_max_possible({"WATER", "CARBON DIOXIDE", "ALCOHOL"});    
+                        std::cout << "Can make " << c << " CHAMPAGNE(s)\n";
+                    }
+                    else if (line == "QUIT") {
+                        std::cout << "Shutting down server...\n";
+                        // Close sockets if needed
+                        close(tcp_fd);
+                        close(udp_fd);
+                        for (int i = 0; i < MAX_CLIENTS; ++i) {
+                            if (client_socket[i] > 0) close(client_socket[i]);
+                        }
+                        return 0; // Exit main
+                    }
+                    else if (!line.empty()) 
+                    {
+                        std::cout << "Unknown command: " << line << '\n';
+                    }
+                }
             }
+
         }
 
         // Handle new TCP connection
@@ -288,32 +330,7 @@ int main(int argc, char* argv[]) {
                 } 
                 else if (cmd.find("ADD") == 0) // If the request is ADD
                 {
-                    std::istringstream iss(cmd);
-                    std::string action, atom;
-                    unsigned long long amount;
-                    iss >> action >> atom; // Split the request
-                    if (!(iss >> amount)) // If the amount is not a valid number
-                    {
-                        response = "ERROR: Missing or invalid amount\n";
-                    } 
-                    else if (atom_stock.find(atom) == atom_stock.end()) // If the atom type isn’t known
-                    {
-                        response = "ERROR: Unknown command or atom type\n";
-                    } 
-                    else if (atom_stock[atom] + amount > MAX_STORAGE) // If the new amount of the atom exceeds the limit (10^18)
-                    {
-                        response = "ERROR: Storage limit exceeded (max 10^18)\n";
-                    } 
-                    else // If all checks pass
-                    {
-                        atom_stock[atom] += amount; // Update atom stock
-                        response = "Updated stock:\n";
-                        // Construct response
-                        for (const auto& [key, val] : atom_stock) 
-                        {
-                            response += key + ": " + std::to_string(val) + "\n";
-                        }
-                    }
+                    response = process_add_command(cmd);
                 } 
                 else // Generic error
                 {
@@ -347,9 +364,10 @@ int main(int argc, char* argv[]) {
                     // Determine command type and handle it
                     if (cmd.find("DELIVER") == 0) {
                         response = handle_deliver(cmd); // Send to handle deliver
-                    } else {
-                        handle_add(cmd, sd); // Send to handle add
-                        continue;
+                    } 
+                    else if (cmd.find("ADD") == 0)
+                    {
+                        response = process_add_command(cmd);
                     }
 
                     // Send TCP response

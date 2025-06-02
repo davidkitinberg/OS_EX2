@@ -11,33 +11,57 @@
 
 int main(int argc, char* argv[]) {
     const char* server_host = nullptr;
-    int port = -1;
-    std::string transport = "tcp";
+    int tcp_port = -1;
+    int udp_port = -1;
+    std::string transport;
+
+    static struct option long_options[] = {
+        {"host", required_argument, 0, 'h'},
+        {"tcp-port", required_argument, 0, 'T'},
+        {"udp-port", required_argument, 0, 'U'},
+        {0, 0, 0, 0}
+    };
 
     // Parse command-line arguments
     int opt;
-    while ((opt = getopt(argc, argv, "h:p:t:")) != -1) {
+    while ((opt = getopt_long(argc, argv, "h:T:U:", long_options, nullptr)) != -1) {
         switch (opt) {
             case 'h':
                 server_host = optarg;
                 break;
-            case 'p':
-                port = std::atoi(optarg);
+            case 'T':
+                tcp_port = std::atoi(optarg);
+                transport = "tcp";
                 break;
-            case 't':
-                transport = optarg;
+            case 'U':
+                udp_port = std::atoi(optarg);
+                transport = "udp";
                 break;
             default:
-                std::cerr << "Usage: " << argv[0] << " -h <host> -p <port> [-t tcp|udp]\n";
+                std::cerr << "Usage: " << argv[0] << " -h <host> -T <tcp_port> | -U <udp_port>\n";
                 return 1;
         }
     }
 
-    if (!server_host || port == -1 || (transport != "tcp" && transport != "udp")) {
-        std::cerr << "Error: Missing or invalid arguments.\n";
-        std::cerr << "Usage: " << argv[0] << " -h <host> -p <port> [-t tcp|udp]\n";
+    // Validation logic
+    if (!server_host || (tcp_port == -1 && udp_port == -1)) {
+        std::cerr << "Error: Must specify host and one of -T or -U.\n";
+        std::cerr << "Usage: " << argv[0] << " -h <host> -T <tcp_port> | -U <udp_port>\n";
         return 1;
     }
+
+    if (tcp_port != -1 && udp_port != -1) {
+        std::cerr << "Error: Cannot specify both -T and -U. Choose only one transport.\n";
+        return 1;
+    }
+
+    int port = (tcp_port != -1) ? tcp_port : udp_port;
+
+    // if (!server_host || port == -1 || (transport != "tcp" && transport != "udp")) {
+    //     std::cerr << "Error: Missing or invalid arguments.\n";
+    //     std::cerr << "Usage: " << argv[0] << " -h <host> -p <port> [-t tcp|udp]\n";
+    //     return 1;
+    // }
 
     // Prepare address lookup
     struct addrinfo hints{}, *res;
