@@ -1,0 +1,896 @@
+        -:    0:Source:bar_drinks.cpp
+        -:    0:Graph:bar_drinks.gcno
+        -:    0:Data:bar_drinks.gcda
+        -:    0:Runs:12
+        -:    1:#include <iostream>
+        -:    2:#include <string>
+        -:    3:#include <vector>
+        -:    4:#include <cstring>
+        -:    5:#include <map>
+        -:    6:#include <netinet/in.h>
+        -:    7:#include <sstream>
+        -:    8:#include <unistd.h>
+        -:    9:#include <sys/socket.h>
+        -:   10:#include <sys/select.h>
+        -:   11:#include <arpa/inet.h>
+        -:   12:#include <cstdlib>
+        -:   13:#include <csignal>
+        -:   14:#include <getopt.h>
+        -:   15:#include <set>
+        -:   16:#include <climits>
+        -:   17:#include <fcntl.h>
+        -:   18:#include <algorithm>
+        -:   19:#include <sys/un.h>
+        -:   20:#include <sys/mman.h>
+        -:   21:#include <sys/stat.h>
+        -:   22:
+        -:   23:#define MAX_CLIENTS 10 // Max number of TCP clients
+        -:   24:#define BUFFER_SIZE 1024 // Buffer size for messages
+        -:   25:
+        -:   26:// Struct used for mmap-based persistent storage
+        -:   27:struct AtomInventory {
+        -:   28:    unsigned long long carbon;
+        -:   29:    unsigned long long oxygen;
+        -:   30:    unsigned long long hydrogen;
+        -:   31:};
+        -:   32:
+        -:   33:AtomInventory* shared_inventory = nullptr; // pointer to the mmap'd region
+        -:   34:int save_fd = -1;
+        -:   35:std::string save_file_path;
+        -:   36:
+        -:   37:// Atom stock map: keeps track of current inventory
+        -:   38:std::map<std::string, unsigned long long> atom_stock = {
+        -:   39:    {"CARBON", 0},
+        -:   40:    {"OXYGEN", 0},
+        -:   41:    {"HYDROGEN", 0}
+        -:   42:};
+        -:   43:
+        -:   44:const unsigned long long MAX_STORAGE = 1000000000000000000ULL; // 10^18
+        -:   45:
+        -:   46:// Molecule recipes: each molecule needs a specific number of atoms
+        -:   47:std::map<std::string, std::map<std::string, int>> molecule_recipes = {
+        -:   48:    {"WATER", {{"HYDROGEN", 2}, {"OXYGEN", 1}}},
+        -:   49:    {"CARBON DIOXIDE", {{"CARBON", 1}, {"OXYGEN", 2}}},
+        -:   50:    {"ALCOHOL", {{"CARBON", 2}, {"HYDROGEN", 6}, {"OXYGEN", 1}}},
+        -:   51:    {"GLUCOSE", {{"CARBON", 6}, {"HYDROGEN", 12}, {"OXYGEN", 6}}}
+        -:   52:};
+        -:   53:
+        -:   54:// Lock the writing one a file
+       74:   55:void lock_file(int fd) {
+       74:   56:    struct flock lock = {
+        -:   57:        .l_type = F_WRLCK, // Write lock
+        -:   58:        .l_whence = SEEK_SET, // From the beginning of the file
+        -:   59:        .l_start = 0, // Offset 0
+        -:   60:        .l_len = sizeof(AtomInventory) // Lock only the relevant region (entire AtomInventory struct)
+        -:   61:    };
+        -:   62:
+        -:   63:    // Block until the lock is acquired
+       74:   64:    if (fcntl(fd, F_SETLKW, &lock) == -1) {
+    #####:   65:        perror("fcntl lock");
+    #####:   66:        exit(1);
+        -:   67:    }
+       74:   68:}
+        -:   69:
+        -:   70:// Unlock the file - after the process finished writing/reading from it
+       74:   71:void unlock_file(int fd) {
+       74:   72:    struct flock lock = {
+        -:   73:        .l_type = F_UNLCK, // Unlock
+        -:   74:        .l_whence = SEEK_SET, // From the beginning of the file
+        -:   75:        .l_start = 0, // Offset 0
+        -:   76:        .l_len = sizeof(AtomInventory)// Unlock only the relevant region (entire AtomInventory struct)
+        -:   77:    };
+        -:   78:
+        -:   79:    // Release the lock
+       74:   80:    if (fcntl(fd, F_SETLK, &lock) == -1) {
+    #####:   81:        perror("fcntl unlock");
+    #####:   82:        exit(1);
+        -:   83:    }
+       74:   84:}
+        -:   85:
+        -:   86:// Copies current in-memory atom stock into the shared memory file
+        -:   87:// Ensures atomic and synchronized update using file locking
+       34:   88:void sync_to_file() {
+       34:   89:    if (!shared_inventory) return; // Exit if shared memory is not initialized (-f flag)
+        -:   90:
+       26:   91:    lock_file(save_fd);// Lock the file before writing to it
+        -:   92:
+        -:   93:    // Write from the current atom stock to the file
+       52:   94:    shared_inventory->carbon = atom_stock["CARBON"];
+       52:   95:    shared_inventory->oxygen = atom_stock["OXYGEN"];
+       26:   96:    shared_inventory->hydrogen = atom_stock["HYDROGEN"];
+        -:   97:
+        -:   98:    // Ensure changes are flushed to disk immediately
+       26:   99:    msync(shared_inventory, sizeof(AtomInventory), MS_SYNC);
+        -:  100:
+       26:  101:    unlock_file(save_fd); // After we finished writing - release the lock
+        -:  102:}
+        -:  103:
+        -:  104:
+        -:  105:// Updates the in-memory atom stock from the shared memory file
+        -:  106:// Ensures atomic and consistent read using file locking
+       62:  107:void sync_from_file() {
+       62:  108:    if (!shared_inventory) return; // Exit if shared memory is not initialized (-f flag)
+        -:  109:
+       48:  110:    lock_file(save_fd); // Lock the file before reading from it
+        -:  111:
+        -:  112:    // Update the atom stock from the file
+       96:  113:    atom_stock["CARBON"] = shared_inventory->carbon;
+       96:  114:    atom_stock["OXYGEN"] = shared_inventory->oxygen;
+       96:  115:    atom_stock["HYDROGEN"] = shared_inventory->hydrogen;
+        -:  116:
+       48:  117:    unlock_file(save_fd); // After we finished reading - release the lock
+        -:  118:}
+        -:  119:
+        -:  120:
+        -:  121:// Initializes the shared file for the servers
+        6:  122:void init_save_file(const std::string& path) {
+        -:  123:
+        -:  124:    // Check if the file already exists (to decide whether to load or initialize stock)
+        6:  125:    bool file_exists = (access(path.c_str(), F_OK) == 0);
+        -:  126:
+        -:  127:    // Open the file for reading and writing, create if it doesn't exist
+        6:  128:    save_fd = open(path.c_str(), O_RDWR | O_CREAT, 0666);
+        6:  129:    if (save_fd < 0) {
+    #####:  130:        perror("open save file");
+    #####:  131:        exit(1);
+        -:  132:    }
+        -:  133:
+        -:  134:    // Ensure the file is large enough to store the AtomInventory struct
+        6:  135:    if (ftruncate(save_fd, sizeof(AtomInventory)) == -1) {
+    #####:  136:        perror("ftruncate");
+    #####:  137:        exit(1);
+        -:  138:    }
+        -:  139:
+        -:  140:    // Map the file into memory so all processes can share it
+        6:  141:    shared_inventory = (AtomInventory*) mmap(nullptr, // The kernel chooses the mapping address
+        -:  142:                                            sizeof(AtomInventory), // Size of the region to map
+        -:  143:                                             PROT_READ | PROT_WRITE, // Allow read and write in this file region
+        -:  144:                                             MAP_SHARED, // Changes in the file are shared between processes
+        -:  145:                                              save_fd, // File descriptor to map
+        -:  146:                                              0); // Offset in the file
+        -:  147:    // Check for failure of mmap
+        6:  148:    if (shared_inventory == MAP_FAILED) {
+    #####:  149:        perror("Error: Could not initialize file into memory using mmap");
+    #####:  150:        exit(1);
+        -:  151:    }
+        -:  152:
+        -:  153:    // Either load from file or save the current stock depending on file existence
+        6:  154:    if (file_exists) 
+        -:  155:    {
+        5:  156:        sync_from_file(); // override atom_stock with file content
+        -:  157:    } 
+        -:  158:    else 
+        -:  159:    {
+        1:  160:        sync_to_file(); // Write the new stock from the commend line to the file
+        -:  161:    }
+        6:  162:}
+        -:  163:
+        -:  164:
+        -:  165:// Handle ADD command over TCP && UDP
+       31:  166:std::string process_add_command(const std::string& cmd) {
+        -:  167:
+       31:  168:    sync_from_file(); // Sync stock from file before using the stock
+        -:  169:
+       31:  170:    std::istringstream iss(cmd);
+       31:  171:    std::string action, atom;
+        -:  172:    unsigned long long amount;
+       31:  173:    std::string response;
+        -:  174:
+        -:  175:    // Parse input: expecting ADD <ATOM> <AMOUNT>
+       31:  176:    iss >> action >> atom;
+       31:  177:    if (!(iss >> amount)) {
+       12:  178:        return "ERROR: Missing or invalid amount\n";
+        -:  179:    }
+        -:  180:
+        -:  181:    // Check if atom type exists and apply the add logic
+       25:  182:    if (action != "ADD" || atom_stock.find(atom) == atom_stock.end()) 
+        -:  183:    {
+        8:  184:        return "ERROR: Unknown command or atom type\n";
+        -:  185:    }
+        -:  186:
+       21:  187:    if (atom_stock[atom] + amount > MAX_STORAGE) // Check for storage limit
+        -:  188:    {
+        2:  189:        return "ERROR: Storage limit exceeded (max 10^18)\n";
+        -:  190:    }
+        -:  191:
+       20:  192:    atom_stock[atom] += amount; // Update amount
+       20:  193:    sync_to_file();
+        -:  194:
+        -:  195:
+       20:  196:    response = "Updated stock:\n";
+       80:  197:    for (const auto& [key, val] : atom_stock) { // Print the inventory
+       60:  198:        response += key + ": " + std::to_string(val) + "\n";
+        -:  199:    }
+        -:  200:
+       20:  201:    return response;
+       31:  202:}
+        -:  203:
+        -:  204:
+        -:  205:
+        -:  206:// Handle DELIVER command (for both TCP & UDP)
+       17:  207:std::string handle_deliver(const std::string& cmd) {
+        -:  208:
+       17:  209:    sync_from_file(); // Sync stock from file before using the stock
+        -:  210:
+       17:  211:    std::istringstream iss(cmd);
+       17:  212:    std::string action, molecule, part;
+       17:  213:    long long count = -1;
+        -:  214:
+        -:  215:    // Parse input: expecting DELIVER <MOLECULE> <AMOUNT>
+       17:  216:    iss >> action;
+        -:  217:
+       38:  218:    while (iss >> part) 
+        -:  219:    {
+       36:  220:        if (std::all_of(part.begin(), part.end(), ::isdigit)) 
+        -:  221:        {
+        -:  222:            try 
+        -:  223:            {
+       15:  224:                count = std::stoll(part); // safer than stoi for large numbers
+        -:  225:            } 
+    =====:  226:            catch (const std::exception&) 
+        -:  227:            {
+    =====:  228:                return "ERROR: Invalid or out-of-range molecule count\n";
+    =====:  229:            }
+       15:  230:            break;
+        -:  231:        }
+       21:  232:        if (!molecule.empty()) molecule += " ";
+       21:  233:        molecule += part;
+        -:  234:    }
+        -:  235:
+        -:  236:    // Validate the input format and that the molecule exists
+       17:  237:    if (action != "DELIVER" || molecule_recipes.find(molecule) == molecule_recipes.end() || count <= 0) {
+        6:  238:        return "ERROR: Invalid DELIVER command\n";
+        -:  239:    }
+        -:  240:
+        -:  241:    // Backup current stock to revert in case of failure
+       14:  242:    auto original_stock = atom_stock;
+        -:  243:
+        -:  244:    // Try to deduct required atoms for the molecule
+       44:  245:    for (const auto& [atom, qty] : molecule_recipes[molecule]) 
+        -:  246:    {
+       31:  247:        unsigned long long required = static_cast<unsigned long long>(qty) * count;
+        -:  248:        
+       31:  249:        if (atom_stock[atom] < required) { // If there are'nt enough atoms to make the wanted amount of molecules
+        1:  250:            return "ERROR: Not enough atoms to deliver " + molecule + "\n";
+        -:  251:        }
+       30:  252:        atom_stock[atom] -= required; // Update stock
+        -:  253:    }
+        -:  254:
+       13:  255:    sync_to_file();
+       13:  256:    return "SUCCESS: Delivered " + std::to_string(count) + " " + molecule + "\n";
+       17:  257:}
+        -:  258:
+        -:  259:
+        -:  260:
+        -:  261:// Helper function to calculate max number of drinks from stock
+        9:  262:int get_max_possible(std::vector<std::string> required_molecules) {
+        -:  263:
+        9:  264:    sync_from_file(); // Sync stock from file before using the stock
+        -:  265:
+        9:  266:    std::map<std::string, unsigned long long> total_needed;
+        -:  267:
+        -:  268:    // Sum up total atoms required for all molecules that make up the drink
+       36:  269:    for (const std::string& mol : required_molecules) {
+       27:  270:        if (molecule_recipes.find(mol) == molecule_recipes.end()) {
+    #####:  271:            std::cerr << "ERROR: Unknown molecule in GEN command: " << mol << std::endl;
+    #####:  272:            return 0;
+        -:  273:        }
+       93:  274:        for (const auto& [atom, count] : molecule_recipes[mol]) {
+       66:  275:            total_needed[atom] += count;
+        -:  276:        }
+        -:  277:    }
+        -:  278:
+        -:  279:    // Calculate how many drinks can be made based on current atom_stock
+        9:  280:    unsigned long long max_drinks = ULLONG_MAX;
+       36:  281:    for (const auto& [atom, needed_per_drink] : total_needed) {
+      27*:  282:        if (atom_stock.find(atom) == atom_stock.end() || needed_per_drink == 0) return 0;
+       27:  283:        max_drinks = std::min(max_drinks, atom_stock[atom] / needed_per_drink);
+        -:  284:    }
+        -:  285:
+        9:  286:    return static_cast<int>(max_drinks);
+        9:  287:}
+        -:  288:
+        -:  289:// Alarm handler
+        2:  290:void handle_alarm(int sig) {
+        2:  291:    std::cout << "\nTimeout reached. Shutting down server...\n";
+        2:  292:    exit(0);
+        -:  293:}
+        -:  294:
+        -:  295:static struct option long_options[] = {
+        -:  296:    {"oxygen", required_argument, 0, 'o'},
+        -:  297:    {"carbon", required_argument, 0, 'c'},
+        -:  298:    {"hydrogen", required_argument, 0, 'h'},
+        -:  299:    {"timeout", required_argument, 0, 't'},
+        -:  300:    {"tcp-port", required_argument, 0, 'T'},
+        -:  301:    {"udp-port", required_argument, 0, 'U'},
+        -:  302:    {"stream-path", required_argument, 0, 's'},
+        -:  303:    {"datagram-path", required_argument, 0, 'd'},
+        -:  304:    {"save-file", required_argument, 0, 'f'},
+        -:  305:    {0, 0, 0, 0}
+        -:  306:};
+        -:  307:
+        -:  308:
+       12:  309:int main(int argc, char* argv[]) {
+        -:  310:    // Socket and control variables
+        -:  311:    int new_socket, activity, sd, max_sd;
+        -:  312:    struct sockaddr_in address_TCP; // Sock address for TCP
+        -:  313:    struct sockaddr_in address_UDP; // Sock address for UDP
+       12:  314:    std::string uds_stream_path; // Path for UDS stream socket
+       12:  315:    std::string uds_dgram_path; // Path for UDS datagram socket
+        -:  316:
+       12:  317:    int optval = 1; // Option value used for setting socket options
+        -:  318:    char buffer[BUFFER_SIZE]; // Buffer for reading data from sockets
+        -:  319:
+       12:  320:    std::set<std::string> known_udp_clients; // Set to track known UDP clients (IP:PORT)
+        -:  321:
+        -:  322:    // Parse command-line arguments
+        -:  323:    int opt;
+       12:  324:    int tcp_port = -1; // UDP port number
+       12:  325:    int udp_port = -1; // TCP port number
+       12:  326:    int timeout_seconds = -1; // Timeout out for any channel input on select
+       60:  327:    while ((opt = getopt_long(argc, argv, "o:c:h:t:T:U:s:d:f:", long_options, NULL)) != -1) 
+        -:  328:    {
+       49:  329:        switch (opt) 
+        -:  330:        {
+       30:  331:            case 'o': atom_stock["OXYGEN"] = std::stoull(optarg); break;
+       30:  332:            case 'c': atom_stock["CARBON"] = std::stoull(optarg); break;
+       30:  333:            case 'h': atom_stock["HYDROGEN"] = std::stoull(optarg); break;
+        9:  334:            case 't': timeout_seconds = std::stoi(optarg); break;
+        3:  335:            case 's': uds_stream_path = optarg; break;
+        3:  336:            case 'd': uds_dgram_path = optarg; break;
+       27:  337:            case 'T': tcp_port = std::stoi(optarg); break;
+       18:  338:            case 'U': udp_port = std::stoi(optarg); break;
+        6:  339:            case 'f': save_file_path = optarg; break;
+        1:  340:            default:
+        -:  341:                std::cerr << "\nUsage: " << argv[0] 
+        -:  342:                        << " [-T <tcp_port>] [-U <udp_port>] [--stream-path <path>] [--datagram-path <path>] "
+        1:  343:                        << "[--oxygen N] [--carbon N] [--hydrogen N] [--timeout SEC]\n";
+        1:  344:                return 1;
+        -:  345:        }
+        -:  346:    }
+        -:  347:
+        -:  348:    // If we don'y have a saved file yet
+       11:  349:    if (!save_file_path.empty()) {
+        6:  350:        init_save_file(save_file_path);
+        -:  351:    }
+        -:  352:
+        -:  353:    // Validate exclusive OR for stream
+       13:  354:    if ((tcp_port != -1 && !uds_stream_path.empty()) ||
+        2:  355:        (tcp_port == -1 && uds_stream_path.empty())) {
+        1:  356:        std::cerr << "Error: Must specify exactly one of --tcp-port OR --stream-path\n";
+        1:  357:        return 1;
+        -:  358:    }
+        -:  359:
+        -:  360:    // Validate exclusive OR for datagram
+       14:  361:    if ((udp_port != -1 && !uds_dgram_path.empty()) ||
+        4:  362:        (udp_port == -1 && uds_dgram_path.empty())) {
+        1:  363:        std::cerr << "Error: Must specify exactly one of --udp-port OR --datagram-path\n";
+        1:  364:        return 1;
+        -:  365:    }
+        -:  366:
+        -:  367:
+        -:  368:    // We want to make STDIN non-blocking so it won't freeze the entire main loop of select
+        9:  369:    int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+        9:  370:    fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK); // make stdin non-blocking
+       16:  371:    std::string stdin_buf; // Use a string buffer to accumulate stdin input
+        -:  372:
+        -:  373:    
+        -:  374:    fd_set readfds; // Set of sockets fd for select()
+        9:  375:    int client_socket[MAX_CLIENTS] = {0}; // TCP client connections
+        -:  376:
+        -:  377:    // Initialize all file descriptors before logic handling
+        9:  378:    int uds_stream_fd = -1, uds_dgram_fd = -1;
+        9:  379:    int tcp_fd = -1, udp_fd = -1;
+        -:  380:
+        -:  381:
+        -:  382:    struct sockaddr_un addr_uds_stream, addr_uds_dgram; // Initialize domain socket addresses structs
+        -:  383:
+        -:  384:    // Create TCP socket if the TCP port was specified
+        9:  385:    if (tcp_port != -1) 
+        -:  386:    {
+        7:  387:        tcp_fd = socket(AF_INET, SOCK_STREAM, 0); // Create a TCP socket
+        7:  388:        if (tcp_fd < 0) {
+    #####:  389:            perror("Error creating the TCP socket");
+    #####:  390:            exit(1);
+        -:  391:        }
+        -:  392:        // Allow the port to be reused after the program terminates
+        7:  393:        setsockopt(tcp_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+        -:  394:
+        -:  395:        // Initialize the TCP address struct
+        7:  396:        memset(&address_TCP, 0, sizeof(address_TCP));
+        7:  397:        address_TCP.sin_family = AF_INET; // IPv4
+        7:  398:        address_TCP.sin_addr.s_addr = INADDR_ANY; 
+        7:  399:        address_TCP.sin_port = htons(tcp_port);
+        -:  400:
+        -:  401:        // Bind the socket to the specified IP and port
+        7:  402:        if (bind(tcp_fd, (struct sockaddr*)&address_TCP, sizeof(address_TCP)) < 0) {
+    #####:  403:            perror("bind TCP");
+    #####:  404:            exit(1);
+        -:  405:        }
+        -:  406:
+        -:  407:        // Listen for incoming TCP connections
+        7:  408:        if (listen(tcp_fd, 3) < 0) {
+    #####:  409:            perror("listen TCP");
+    #####:  410:            exit(1);
+        -:  411:        }
+        -:  412:
+        7:  413:        std::cout << "TCP listening on port " << tcp_port << std::endl;
+        -:  414:    }
+        -:  415:
+        -:  416:
+        -:  417:    // Create UDP socket if the UDP port was specified
+        9:  418:    if (udp_port != -1) 
+        -:  419:    {
+        -:  420:        // Create a UDP socket
+        6:  421:        udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+        6:  422:        if (udp_fd < 0) {
+    #####:  423:            perror("Error creating UDP socket");
+    #####:  424:            exit(1);
+        -:  425:        }
+        -:  426:        // Allow the port to be reused after the program terminates
+        6:  427:        setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+        -:  428:
+        -:  429:        // Initialize the UDP address struct
+        6:  430:        memset(&address_UDP, 0, sizeof(address_UDP));
+        6:  431:        address_UDP.sin_family = AF_INET;
+        6:  432:        address_UDP.sin_addr.s_addr = INADDR_ANY;
+        6:  433:        address_UDP.sin_port = htons(udp_port);
+        -:  434:
+        -:  435:        // Bind the socket to the specified IP and port
+        6:  436:        if (bind(udp_fd, (struct sockaddr*)&address_UDP, sizeof(address_UDP)) < 0) {
+    #####:  437:            perror("bind UDP");
+    #####:  438:            exit(1);
+        -:  439:        }
+        -:  440:
+        6:  441:        std::cout << "UDP bound to port " << udp_port << std::endl;
+        -:  442:    }
+        -:  443:
+        -:  444:
+        -:  445:    // Create UDS stream socket if requested
+        9:  446:    if (!uds_stream_path.empty()) 
+        -:  447:    {
+        -:  448:        // Create a UDS stream socket
+        2:  449:        uds_stream_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        2:  450:        if (uds_stream_fd < 0) {
+    #####:  451:            perror("Error creating UDS stream socket");
+    #####:  452:            exit(1);
+        -:  453:        }
+        -:  454:        // Unlink this path just in case it was linked to another client before and never unlinked
+        2:  455:        unlink(uds_stream_path.c_str());
+        -:  456:
+        -:  457:        // Initialize the USD stream address struct
+        2:  458:        memset(&addr_uds_stream, 0, sizeof(addr_uds_stream));
+        2:  459:        addr_uds_stream.sun_family = AF_UNIX; // Use Unix domain
+        2:  460:        strncpy(addr_uds_stream.sun_path, uds_stream_path.c_str(), sizeof(addr_uds_stream.sun_path) - 1);
+        -:  461:
+        -:  462:        // Bind the socket to the file path
+        2:  463:        if (bind(uds_stream_fd, (struct sockaddr*)&addr_uds_stream, sizeof(addr_uds_stream)) < 0) {
+    #####:  464:            perror("Error trying to bind UDS stream to path");
+    #####:  465:            exit(1);
+        -:  466:        }
+        -:  467:
+        -:  468:        // Listen for incoming USD stream connections
+        2:  469:        if (listen(uds_stream_fd, 3) < 0) {
+    #####:  470:            perror("listen UDS stream");
+    #####:  471:            exit(1);
+        -:  472:        }
+        -:  473:
+        2:  474:        std::cout << "UDS Stream listening on " << uds_stream_path << std::endl;
+        -:  475:    }
+        -:  476:
+        -:  477:    // Create UDS dgram socket if requested
+        9:  478:    if (!uds_dgram_path.empty()) 
+        -:  479:    {
+        -:  480:        // Create a UDS dgram socket
+        3:  481:        uds_dgram_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+        3:  482:        if (uds_dgram_fd < 0) {
+    #####:  483:            perror("Error creating UDS datagram socket");
+    #####:  484:            exit(1);
+        -:  485:        }
+        -:  486:        // Unlink this path just in case it was linked to another client before and never unlinked
+        3:  487:        unlink(uds_dgram_path.c_str());
+        -:  488:
+        -:  489:        // Initialize the USD dgram address struct
+        3:  490:        memset(&addr_uds_dgram, 0, sizeof(addr_uds_dgram));
+        3:  491:        addr_uds_dgram.sun_family = AF_UNIX;
+        3:  492:        strncpy(addr_uds_dgram.sun_path, uds_dgram_path.c_str(), sizeof(addr_uds_dgram.sun_path) - 1);
+        -:  493:
+        -:  494:        // Bind the socket to the specified filesystem path
+        3:  495:        if (bind(uds_dgram_fd, (struct sockaddr*)&addr_uds_dgram, sizeof(addr_uds_dgram)) < 0) {
+    #####:  496:            perror("Error trying to bind UDS datagram to path");
+    #####:  497:            exit(1);
+        -:  498:        }
+        -:  499:
+        3:  500:        std::cout << "UDS Datagram bound to " << uds_dgram_path << std::endl;
+        -:  501:    }
+        -:  502:
+        -:  503:
+        -:  504:
+        -:  505:    // Timeout handling
+        9:  506:    if (timeout_seconds > 0) {
+        3:  507:    signal(SIGALRM, handle_alarm); // Set handler
+        3:  508:    alarm(timeout_seconds);        // Start initial alarm
+        -:  509:    }
+        -:  510:
+        -:  511:    
+        -:  512:
+        -:  513:    while (true)
+        -:  514:    {
+     1326:  515:        FD_ZERO(&readfds); // Clear and prepare file descriptor set
+        -:  516:
+        -:  517:        // If we recieve uds/tcp/udp arguments, add their file descriptor to the file descriptor set
+       78:  518:        if (tcp_fd != -1) FD_SET(tcp_fd, &readfds);
+       78:  519:        if (udp_fd != -1) FD_SET(udp_fd, &readfds);
+       78:  520:        if (uds_stream_fd != -1) FD_SET(uds_stream_fd, &readfds); 
+       78:  521:        if (uds_dgram_fd != -1) FD_SET(uds_dgram_fd, &readfds);
+        -:  522:
+       78:  523:        FD_SET(STDIN_FILENO, &readfds); // Add STDIN to read set
+        -:  524:
+        -:  525:        // Initial max_sd to tell select number of bits in the fd_set it needs to scan
+        -:  526:        // Add all existing TCP and UDS-STREAM client sockets
+       78:  527:        max_sd = STDIN_FILENO;
+      858:  528:        for (int i = 0; i < MAX_CLIENTS; ++i) {
+      780:  529:            sd = client_socket[i];
+      780:  530:            if (sd > 0) FD_SET(sd, &readfds);
+      780:  531:            if (sd > max_sd) max_sd = sd;
+        -:  532:        }
+        -:  533:
+        -:  534:        // Update max_sd with all server listening sockets
+       78:  535:        max_sd = std::max(max_sd, tcp_fd);
+       78:  536:        max_sd = std::max(max_sd, udp_fd);
+       78:  537:        max_sd = std::max(max_sd, uds_stream_fd);
+       78:  538:        max_sd = std::max(max_sd, uds_dgram_fd);
+        -:  539:        
+        -:  540:
+        -:  541:        // Wait for activity on one of the fds (select())
+       78:  542:        activity = select(max_sd + 1, &readfds, nullptr, nullptr, nullptr);
+      76*:  543:        if (activity < 0) {
+    #####:  544:            perror("Error in select activity");
+    #####:  545:            continue;
+        -:  546:        }
+       76:  547:        if (timeout_seconds > 0) alarm(timeout_seconds);   // reset timeout time
+        -:  548:
+        -:  549:
+        -:  550:
+        -:  551:        // handle STDIN input
+       76:  552:        if (FD_ISSET(STDIN_FILENO, &readfds)) // Select detects activity in STDIN
+        -:  553:        {
+        -:  554:            char tmp[256]; // Temporary buffer
+       20:  555:            ssize_t nbytes = read(STDIN_FILENO, tmp, sizeof(tmp)); // Number of bytes read by STDIN
+       20:  556:            if (nbytes > 0) 
+        -:  557:            {
+       20:  558:                stdin_buf.append(tmp, nbytes); // accumulate what we got
+        -:  559:                size_t pos; // Number of bytes of current new line
+        -:  560:
+        -:  561:                // The loop runs as long as there’s at least one complete line in stdin_buf
+       33:  562:                while ((pos = stdin_buf.find('\n')) != std::string::npos) 
+        -:  563:                {
+       20:  564:                    std::string line = stdin_buf.substr(0, pos); // Extract the full line
+       20:  565:                    stdin_buf.erase(0, pos + 1); // Removes the new line from the buffer
+        -:  566:
+        -:  567:                    // Removes trailing spaces/carriage returns/tabs
+       20:  568:                    line.erase(line.find_last_not_of(" \t\r") + 1);
+        -:  569:
+        -:  570:                    // Handle the command - call get_max_possible with the correct recipe 
+       20:  571:                    if (line == "GEN SOFT DRINK") 
+        -:  572:                    {
+        3:  573:                        std::cout << "Can make " << get_max_possible(
+        -:  574:                                    {"WATER","CARBON DIOXIDE","GLUCOSE"})
+        9:  575:                                << " SOFT DRINK(s)\n";
+        -:  576:                    } 
+       17:  577:                    else if (line == "GEN VODKA") 
+        -:  578:                    {
+        3:  579:                        std::cout << "Can make " << get_max_possible(
+        -:  580:                                    {"WATER","GLUCOSE","ALCOHOL"})
+        9:  581:                                << " VODKA(s)\n";
+        -:  582:                    } 
+       14:  583:                    else if (line == "GEN CHAMPAGNE") 
+        -:  584:                    {
+        3:  585:                        std::cout << "Can make " << get_max_possible(
+        -:  586:                                    {"WATER","CARBON DIOXIDE","ALCOHOL"})
+        9:  587:                                << " CHAMPAGNE(s)\n";
+        -:  588:                    } 
+       11:  589:                    else if (line == "QUIT") 
+        -:  590:                    {
+        7:  591:                        std::cout << "Shutting down server…\n";
+        -:  592:                        // Close all fds and unlink sockets
+        7:  593:                        return EXIT_SUCCESS; // Exit main
+        -:  594:                    } 
+        4:  595:                    else if (!line.empty()) 
+        -:  596:                    {
+        4:  597:                        std::cout << "Unknown command: " << line << '\n';
+        -:  598:                    }
+       20:  599:                }
+        -:  600:            }
+        -:  601:        }
+        -:  602:
+        -:  603:        // Handle new TCP connection
+       69:  604:        if (FD_ISSET(tcp_fd, &readfds)) // Checks whether the TCP socket (tcp_fd) is ready for reading
+        -:  605:        {
+        -:  606:            struct sockaddr_in client_addr; // Struct to store the client's address
+        2:  607:            socklen_t client_len = sizeof(client_addr); // Initialize client_len to the size of that struct
+        2:  608:            new_socket = accept(tcp_fd, (struct sockaddr*)&client_addr, &client_len); // Accepts the incoming TCP connection
+        -:  609:
+        -:  610:            char client_ip[INET_ADDRSTRLEN]; 
+        2:  611:            inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN); // Converts the client’s IP address to string
+        2:  612:            int client_port = ntohs(client_addr.sin_port);
+        -:  613:
+        2:  614:            std::cout << "New connection, socket fd is TCP from " << client_ip << ":" << client_port << std::endl;
+        -:  615:
+        -:  616:            // Store new socket
+       2*:  617:            for (int i = 0; i < MAX_CLIENTS; i++) 
+        -:  618:            {
+        2:  619:                if (client_socket[i] == 0) 
+        -:  620:                {
+        2:  621:                    client_socket[i] = new_socket;
+        2:  622:                    break;
+        -:  623:                }
+        -:  624:            }
+        -:  625:        }
+        -:  626:
+        -:  627:        // Handle new UDS-STREAM connections
+       69:  628:        if (uds_stream_fd != -1 && FD_ISSET(uds_stream_fd, &readfds)) 
+        -:  629:        {
+        1:  630:            new_socket = accept(uds_stream_fd, nullptr, nullptr);
+        1:  631:            if (new_socket >= 0) 
+        -:  632:            {
+        1:  633:                std::cout << "New connection, socket fd is UDS-STREAM\n";
+        -:  634:                // Make UDS STREAN non-blocking
+        1:  635:                int fl = fcntl(new_socket,F_GETFL,0); 
+        1:  636:                fcntl(new_socket,F_SETFL,fl|O_NONBLOCK);
+        -:  637:
+        -:  638:                // Store new socket
+       1*:  639:                for (int i = 0; i < MAX_CLIENTS; ++i)
+        -:  640:                {
+        1:  641:                    if (client_socket[i] == 0) 
+        -:  642:                    { 
+        1:  643:                        client_socket[i] = new_socket; break; 
+        -:  644:                    }
+        -:  645:                }
+        -:  646:                    
+        -:  647:            }
+        -:  648:        }
+        -:  649:
+        -:  650:        // Handle new UDP message
+       69:  651:        if (udp_fd != -1 && FD_ISSET(udp_fd, &readfds)) // Checks if the UDP socket has received a message
+        -:  652:        {
+        -:  653:
+        -:  654:            struct sockaddr_in client_addr; // Prepare sockaddr_in struct to store the client's address info
+        8:  655:            socklen_t client_len = sizeof(client_addr);
+        8:  656:            memset(buffer, 0, BUFFER_SIZE); // Clears the buffer
+        -:  657:            // Reads a UDP datagram from the socket into buffer
+        8:  658:            int n = recvfrom(udp_fd, buffer, BUFFER_SIZE, 0, (struct sockaddr*)&client_addr, &client_len);
+        -:  659:
+        8:  660:            if (n > 0) // If we received a message
+        -:  661:            {
+        -:  662:                // Track new UDP client
+        -:  663:                char client_ip[INET_ADDRSTRLEN]; 
+        8:  664:                inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN); // Converts the client's IP to string
+        8:  665:                int client_port = ntohs(client_addr.sin_port);
+       24:  666:                std::string client_id = std::string(client_ip)+":"+std::to_string(ntohs(client_port));
+        8:  667:                if (known_udp_clients.insert(client_id).second)
+        -:  668:                {
+        2:  669:                    std::cout << "New connection, socket fd is UDP from " << client_id << '\n';
+        -:  670:                }
+        -:  671:                
+        8:  672:                std::string cmd(buffer);
+        8:  673:                std::string response; // Store the response
+        -:  674:
+        -:  675:                // Parse and handle UDP command
+        8:  676:                if (cmd.find("DELIVER") == 0) // If the request is DELIVER
+        -:  677:                {
+        4:  678:                    response = handle_deliver(cmd); // Call handle deliver
+        -:  679:                } 
+        4:  680:                else if (cmd.find("ADD") == 0) // If the request is ADD
+        -:  681:                {
+        3:  682:                    response = process_add_command(cmd);
+        -:  683:                } 
+        -:  684:                else // Generic error
+        -:  685:                {
+        1:  686:                    response = "ERROR: Unsupported command\n";
+        -:  687:                }
+        -:  688:
+        -:  689:                // Send UDP response back to the same client that sent the request
+        8:  690:                sendto(udp_fd, response.c_str(), response.size(), 0, (struct sockaddr*)&client_addr, client_len);
+        8:  691:            }
+        -:  692:        }
+        -:  693:
+        -:  694:
+        -:  695:
+        -:  696:        // Handle incoming connection on UDS dgram socket
+       69:  697:        if (uds_dgram_fd != -1 && FD_ISSET(uds_dgram_fd, &readfds)) 
+        -:  698:        {
+        -:  699:            struct sockaddr_un client_addr; 
+       24:  700:            socklen_t client_len = sizeof(client_addr);
+       24:  701:            memset(buffer,0,BUFFER_SIZE); // Clear buffer for new input
+        -:  702:
+        -:  703:            // Receive the datagram and capture the client's address
+       24:  704:            int bytes = recvfrom(uds_dgram_fd, buffer, BUFFER_SIZE, 0,
+       24:  705:                                (struct sockaddr*)&client_addr, &client_len);
+       24:  706:            if (bytes > 0) 
+        -:  707:            {
+       24:  708:                std::string cmd(buffer); // Convert the buffer into a string command
+       24:  709:                std::string response;
+        -:  710:
+        -:  711:                // Process the command
+       24:  712:                if (cmd.find("DELIVER") == 0)
+        5:  713:                    response = handle_deliver(cmd);
+       19:  714:                else if (cmd.find("ADD") == 0)
+       18:  715:                    response = process_add_command(cmd);
+        -:  716:                else
+        1:  717:                    response = "ERROR: Unsupported command\n";
+        -:  718:
+        -:  719:                // Send the response back to the client at the captured address
+       24:  720:                sendto(uds_dgram_fd, response.c_str(), response.size(), 0,
+        -:  721:                    (struct sockaddr*)&client_addr, client_len);
+       24:  722:            }
+        -:  723:        }
+        -:  724:
+        -:  725:
+        -:  726:        // Handle existing TCP and UDS-STREAM client's messages
+      759:  727:        for (int i = 0; i < MAX_CLIENTS; ++i) 
+        -:  728:        {
+      690:  729:            sd = client_socket[i]; // Store the socket file descriptor of client i
+      692:  730:            if (sd == 0 || !FD_ISSET(sd, &readfds)) continue; // Check if this client’s socket has incoming data
+        -:  731:
+       21:  732:            int n = read(sd, buffer, BUFFER_SIZE); // Read incoming data from the client into buffer
+       21:  733:            if (n <= 0) { // If the incoming data is empty message
+        2:  734:                close(sd); // TCP client disconnected
+        2:  735:                client_socket[i] = 0;
+        2:  736:                continue;
+        -:  737:            }
+       19:  738:            buffer[n] = '\0'; // Add end of string
+        -:  739:
+       19:  740:            std::string cmd(buffer); // Convert the request to string
+       19:  741:            std::string response; 
+        -:  742:
+        -:  743:
+        -:  744:            // Determine command type and handle it
+       19:  745:            if (cmd.find("DELIVER") == 0) {
+        8:  746:                response = handle_deliver(cmd); // Send to handle deliver
+        -:  747:            } 
+       11:  748:            else if (cmd.find("ADD") == 0)
+        -:  749:            {
+       10:  750:                response = process_add_command(cmd);
+        -:  751:            }
+        -:  752:            else 
+        -:  753:            {
+        1:  754:                response = "ERROR: Unsupported command\n";
+        -:  755:            }
+        -:  756:
+        -:  757:            // Send response
+       19:  758:            send(sd, response.c_str(), response.size(), 0);
+       19:  759:        }
+       69:  760:    }
+        -:  761:
+        -:  762:
+        -:  763:    return EXIT_SUCCESS;
+       10:  764:}
+
+
+
+Final report:
+
+david@DESKTOP-JIR4E5H:~/OS_EX2/Task_6$ gcov bar_drinks.cpp
+File 'bar_drinks.cpp'
+Lines executed:88.58% of 324
+Creating 'bar_drinks.cpp.gcov'
+
+File '/usr/include/c++/13/bits/new_allocator.h'
+Lines executed:71.88% of 64
+Creating 'new_allocator.h.gcov'
+
+File '/usr/include/c++/13/bits/allocator.h'
+Lines executed:100.00% of 4
+Creating 'allocator.h.gcov'
+
+File '/usr/include/c++/13/bits/stl_map.h'
+Lines executed:91.46% of 82
+Creating 'stl_map.h.gcov'
+
+File '/usr/include/c++/13/tuple'
+Lines executed:55.41% of 74
+Creating 'tuple.gcov'
+
+File '/usr/include/c++/13/bits/stl_tree.h'
+Lines executed:81.12% of 1070
+Creating 'stl_tree.h.gcov'
+
+File '/usr/include/c++/13/bits/move.h'
+Lines executed:87.50% of 64
+Creating 'move.h.gcov'
+
+File '/usr/include/c++/13/bits/stl_pair.h'
+Lines executed:100.00% of 68
+Creating 'stl_pair.h.gcov'
+
+File '/usr/include/c++/13/ext/aligned_buffer.h'
+Lines executed:100.00% of 40
+Creating 'aligned_buffer.h.gcov'
+
+File '/usr/include/c++/13/bits/stl_construct.h'
+Lines executed:100.00% of 13
+Creating 'stl_construct.h.gcov'
+
+File '/usr/include/c++/13/bits/alloc_traits.h'
+Lines executed:100.00% of 9
+Creating 'alloc_traits.h.gcov'
+
+File '/usr/include/c++/13/bits/stl_uninitialized.h'
+Lines executed:81.25% of 16
+Creating 'stl_uninitialized.h.gcov'
+
+File '/usr/include/c++/13/bits/stl_iterator.h'
+Lines executed:100.00% of 29
+Creating 'stl_iterator.h.gcov'
+
+File '/usr/include/c++/13/bits/predefined_ops.h'
+Lines executed:100.00% of 12
+Creating 'predefined_ops.h.gcov'
+
+File '/usr/include/c++/13/bits/stl_vector.h'
+Lines executed:97.96% of 49
+Creating 'stl_vector.h.gcov'
+
+File '/usr/include/c++/13/bits/stl_algobase.h'
+Lines executed:71.74% of 46
+Creating 'stl_algobase.h.gcov'
+
+File '/usr/include/c++/13/bits/stl_function.h'
+Lines executed:100.00% of 12
+Creating 'stl_function.h.gcov'
+
+File '/usr/include/c++/13/bits/stl_algo.h'
+Lines executed:100.00% of 8
+Creating 'stl_algo.h.gcov'
+
+File '/usr/include/c++/13/bits/stl_iterator_base_types.h'
+Lines executed:100.00% of 1
+Creating 'stl_iterator_base_types.h.gcov'
+
+File '/usr/include/c++/13/bits/basic_string.h'
+Lines executed:93.15% of 73
+Creating 'basic_string.h.gcov'
+
+File '/usr/include/c++/13/initializer_list'
+Lines executed:100.00% of 12
+Creating 'initializer_list.gcov'
+
+File '/usr/include/c++/13/ext/alloc_traits.h'
+Lines executed:100.00% of 1
+Creating 'alloc_traits.h.gcov'
+
+File '/usr/include/c++/13/bits/basic_string.tcc'
+Lines executed:66.67% of 36
+Creating 'basic_string.tcc.gcov'
+
+File '/usr/include/c++/13/bits/stl_iterator_base_funcs.h'
+Lines executed:100.00% of 3
+Creating 'stl_iterator_base_funcs.h.gcov'
+
+File '/usr/include/c++/13/bits/char_traits.h'
+Lines executed:24.14% of 29
+Creating 'char_traits.h.gcov'
+
+File '/usr/include/c++/13/bits/stl_set.h'
+Lines executed:100.00% of 5
+Creating 'stl_set.h.gcov'
+
+File '/usr/include/c++/13/bits/charconv.h'
+Lines executed:100.00% of 78
+Creating 'charconv.h.gcov'
+
+File '/usr/include/c++/13/ext/string_conversions.h'
+Lines executed:81.54% of 65
+Creating 'string_conversions.h.gcov'
+
+File '/usr/include/c++/13/new'
+Lines executed:66.67% of 3
+Creating 'new.gcov'
+
+File '/usr/include/x86_64-linux-gnu/c++/13/bits/c++config.h'
+Lines executed:100.00% of 2
+Creating 'c++config.h.gcov'
+
+Lines executed:83.68% of 2292
+david@DESKTOP-JIR4E5H:~/OS_EX2/Task_6$

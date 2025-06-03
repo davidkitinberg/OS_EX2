@@ -58,8 +58,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (transport == "tcp") {
-        // TCP: connect to server
+    if (transport == "tcp") { // TCP: connect to server
+        
         if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
             perror("Connection failed");
             freeaddrinfo(res);

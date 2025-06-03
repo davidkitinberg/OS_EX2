@@ -46,7 +46,7 @@ std::string process_add_command(const std::string& cmd) {
     unsigned long long amount;
     std::string response;
 
-    // Parse input: expecting ADD <ATOM> <AMOUNT>
+    // Parse input: ADD <ATOM> <AMOUNT>
     iss >> action >> atom;
     if (!(iss >> amount)) {
         return "ERROR: Missing or invalid amount\n";
@@ -78,15 +78,23 @@ std::string process_add_command(const std::string& cmd) {
 std::string handle_deliver(const std::string& cmd) {
     std::istringstream iss(cmd);
     std::string action, molecule, part;
-    int count = -1;
+    long long count = -1;
 
-    // Parse input: expecting DELIVER <MOLECULE> <AMOUNT>
+    // Parse input: DELIVER <MOLECULE> <AMOUNT>
     iss >> action;
 
     while (iss >> part) 
     {
-        if (std::all_of(part.begin(), part.end(), ::isdigit)) {
-            count = std::stoi(part);
+        if (std::all_of(part.begin(), part.end(), ::isdigit)) 
+        {
+            try 
+            {
+                count = std::stoll(part);
+            } 
+            catch (const std::exception&) 
+            {
+                return "ERROR: Invalid or out-of-range molecule count\n";
+            }
             break;
         }
         if (!molecule.empty()) molecule += " ";
@@ -165,7 +173,7 @@ int main(int argc, char* argv[]) {
     struct sockaddr_in address_UDP;
     int optval = 1;
     char buffer[BUFFER_SIZE];
-    //int port = -1;
+
 
     std::set<std::string> known_udp_clients; // Set to track known UDP clients (IP:PORT)
 
@@ -234,7 +242,7 @@ int main(int argc, char* argv[]) {
     // Timeout handling
     if (timeout_seconds > 0) {
     signal(SIGALRM, handle_alarm); // Set handler
-    alarm(timeout_seconds);        // Start initial alarm
+    alarm(timeout_seconds); // Start initial alarm
     }
 
     while (true) 
@@ -267,7 +275,8 @@ int main(int argc, char* argv[]) {
 
             char tmp[256]; // Temporary buffer
             ssize_t numberOfBytes = ::read(STDIN_FILENO, tmp, sizeof(tmp)); // Number of bytes read by STDIN
-            if (numberOfBytes > 0) {
+            if (numberOfBytes > 0) 
+            {
                 stdin_buf.append(tmp, numberOfBytes); // accumulate what we got
                 size_t nl; // Number of bytes of current new line
                 while ((nl = stdin_buf.find('\n')) != std::string::npos) // The loop runs as long as there’s at least one complete line in stdin_buf

@@ -3,7 +3,6 @@ CXX = g++
 CXXFLAGS = -Wall -std=c++17
 
 
-# Default target: build both
 all: atom_warehouse atom_supplier
 
 atom_warehouse: atom_warehouse.cpp

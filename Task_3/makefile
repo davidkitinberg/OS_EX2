@@ -3,7 +3,6 @@ CXX = g++
 CXXFLAGS = -Wall -std=c++17
 
 
-# Default target: build both
 all: bar_drinks molecule_requester
 
 bar_drinks: bar_drinks.cpp

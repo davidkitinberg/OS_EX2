@@ -1,0 +1,292 @@
+        -:    0:Source:molecule_requester.cpp
+        -:    0:Graph:molecule_requester.gcno
+        -:    0:Data:molecule_requester.gcda
+        -:    0:Runs:9
+        -:    1:#include <iostream>
+        -:    2:#include <string>
+        -:    3:#include <cstring>
+        -:    4:#include <unistd.h>
+        -:    5:#include <netdb.h>
+        -:    6:#include <arpa/inet.h>
+        -:    7:#include <sys/un.h>
+        -:    8:#include <getopt.h>
+        -:    9:#include <cstdlib>
+        -:   10:#include <fcntl.h>
+        -:   11:
+        -:   12:#define BUFFER_SIZE 1024
+        -:   13:
+        9:   14:int main(int argc, char* argv[]) {
+        9:   15:    const char* server_host = nullptr; // Hostname or IP address of the server (for TCP/UDP)
+        9:   16:    int tcp_port = -1; // TCP port number
+        9:   17:    int udp_port = -1; // UDP port number
+        9:   18:    std::string uds_stream_path; // Path to the Unix Domain Socket stream file
+        9:   19:    std::string uds_dgram_path; // Path to the Unix Domain Socket datagram file
+        9:   20:    std::string transport; // Selected transport type: "tcp", "udp", "uds_stream", or "uds_dgram"
+        9:   21:    std::string client_path; // Path for the client's own UDS datagram socket (used only in "uds_dgram" mode)
+        -:   22:
+        -:   23:    static struct option long_options[] = {
+        -:   24:        {"host", required_argument, 0, 'h'},
+        -:   25:        {"tcp-port", required_argument, 0, 'T'},
+        -:   26:        {"udp-port", required_argument, 0, 'U'},
+        -:   27:        {"stream-path", required_argument, 0, 's'},
+        -:   28:        {"datagram-path", required_argument, 0, 'd'},
+        -:   29:        {0, 0, 0, 0}
+        -:   30:    };
+        -:   31:
+        -:   32:    // Parse command-line arguments
+        -:   33:    int opt;
+       19:   34:    while ((opt = getopt_long(argc, argv, "h:T:U:s:d:", long_options, nullptr)) != -1) {
+       11:   35:        switch (opt) {
+        3:   36:            case 'h': server_host = optarg; break;
+        4:   37:            case 'T': tcp_port = std::atoi(optarg); transport = "tcp"; break;
+        1:   38:            case 'U': udp_port = std::atoi(optarg); transport = "udp"; break;
+        1:   39:            case 's': uds_stream_path = optarg; transport = "uds_stream"; break;
+        1:   40:            case 'd': uds_dgram_path = optarg; transport = "uds_dgram"; break;
+        1:   41:            default:
+        1:   42:                std::cerr << "Usage: " << argv[0] << " -h <host> -T <port> | -U <port> | -s <path> | -d <path>\n";
+        1:   43:                return 1;
+        -:   44:        }
+        -:   45:    }
+        -:   46:
+        -:   47:    // Validate mutual exclusivity of transport options
+        8:   48:    int transport_count = (tcp_port != -1) + (udp_port != -1) + !uds_stream_path.empty() + !uds_dgram_path.empty();
+        8:   49:    if (transport_count != 1) {
+        2:   50:        std::cerr << "Error: Must specify exactly one of -T, -U, -s, or -d.\n";
+        2:   51:        return 1;
+        -:   52:    }
+        -:   53:
+        -:   54:    int sock; // Socket fd
+        6:   55:    struct sockaddr_un uds_addr{}; // Address struct for UDS
+        6:   56:    struct addrinfo hints{}, *res; // Structs for resolving hostnames/IPs (used in TCP/UDP)
+        6:   57:    char buffer[BUFFER_SIZE] = {0}; // Buffer for sending/receiving data
+        -:   58:
+        6:   59:    if (transport == "tcp" || transport == "udp") {
+        4:   60:        if (!server_host) { // Host name for TCP/UDP
+        1:   61:            std::cerr << "Error: host (-h) is required for TCP/UDP.\n";
+        1:   62:            return 1;
+        -:   63:        }
+        -:   64:
+        -:   65:        // Select the correct port based on which was specified
+        3:   66:        int port = (tcp_port != -1) ? tcp_port : udp_port;
+        -:   67:
+        -:   68:        // Prepare hints for address resolution (IPv4, stream or datagram socket)
+        3:   69:        hints.ai_family = AF_INET;
+        3:   70:        hints.ai_socktype = (transport == "tcp") ? SOCK_STREAM : SOCK_DGRAM;
+        -:   71:
+        3:   72:        std::string port_str = std::to_string(port); // Convert port number to string for getaddrinfo
+        -:   73:        // Resolve server address and port
+        3:   74:        if (getaddrinfo(server_host, port_str.c_str(), &hints, &res) != 0) {
+    #####:   75:            perror("getaddrinfo");
+    #####:   76:            return 1;
+        -:   77:        }
+        -:   78:
+        -:   79:        // Create the socket
+        3:   80:        sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        3:   81:        if (sock < 0) {
+    #####:   82:            perror("socket");
+    #####:   83:            freeaddrinfo(res);
+    #####:   84:            return 1;
+        -:   85:        }
+        -:   86:
+        3:   87:        if (transport == "tcp") // If it's TCP, establish a connection
+        -:   88:        {
+        2:   89:            if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) 
+        -:   90:            {
+    #####:   91:                perror("connect");
+    #####:   92:                freeaddrinfo(res);
+    #####:   93:                close(sock);
+    #####:   94:                return 1;
+        -:   95:            }
+        2:   96:            std::cout << "Connected via TCP to " << server_host << ":" << port << "\n";
+        -:   97:        } 
+        -:   98:        else // If it's UDP, we don't need to establish a connection
+        -:   99:        {
+        1:  100:            std::cout << "Ready to send UDP messages to " << server_host << ":" << port << "\n";
+        -:  101:        }
+        3:  102:    } 
+        -:  103:    else // uds_stream || uds_dgram
+        -:  104:    {
+        -:  105:        // Create a UNIX domain socket uds_stream/uds_dgram
+        2:  106:        sock = socket(AF_UNIX, (transport == "uds_stream" ? SOCK_STREAM : SOCK_DGRAM), 0);
+        2:  107:        if (sock < 0) {
+    #####:  108:            perror("socket (UDS)");
+    #####:  109:            return 1;
+        -:  110:        }
+        -:  111:
+        -:  112:        // Initialize and configure the server address structure
+        2:  113:        memset(&uds_addr, 0, sizeof(uds_addr));
+        2:  114:        uds_addr.sun_family = AF_UNIX;
+        -:  115:
+        -:  116:        // Use the socket path from the command-line argument
+        2:  117:        std::string path = (transport == "uds_stream") ? uds_stream_path : uds_dgram_path;
+        2:  118:        strncpy(uds_addr.sun_path, path.c_str(), sizeof(uds_addr.sun_path) - 1);
+        -:  119:
+        2:  120:        if (transport == "uds_stream") // For UDS stream, connect to the server
+        -:  121:        {
+        1:  122:            if (connect(sock, (struct sockaddr*)&uds_addr, sizeof(uds_addr)) < 0) 
+        -:  123:            {
+    #####:  124:                perror("connect (UDS stream)");
+    #####:  125:                close(sock);
+    #####:  126:                return 1;
+        -:  127:            }
+        1:  128:            std::cout << "Connected to UDS stream at " << path << "\n";
+        -:  129:        } 
+        -:  130:        else // For UDS datagram, we don't need to connect
+        -:  131:        {
+        1:  132:            std::cout << "Ready to send UDS datagrams to " << path << "\n";
+        -:  133:        }
+        -:  134:
+        2:  135:        if (transport == "uds_dgram") 
+        -:  136:        {
+        -:  137:            // Generate a unique client socket path for this client socket using its process ID
+        1:  138:            client_path = "/tmp/uds_client_" + std::to_string(getpid()) + ".sock";
+        -:  139:
+        -:  140:            // Unlink this path just in case it was linked to another client before and never unlinked
+        1:  141:            unlink(client_path.c_str()); 
+        -:  142:
+        -:  143:            // Set up the client address struct for binding
+        1:  144:            struct sockaddr_un client_addr{};
+        1:  145:            client_addr.sun_family = AF_UNIX;
+        1:  146:            strncpy(client_addr.sun_path, client_path.c_str(), sizeof(client_addr.sun_path) - 1);
+        -:  147:
+        -:  148:            // Bind the client socket to its unique path
+        1:  149:            if (bind(sock, (struct sockaddr*)&client_addr, sizeof(client_addr)) < 0) 
+        -:  150:            {
+    #####:  151:                perror("bind (UDS datagram client)");
+    #####:  152:                close(sock);
+    #####:  153:                return 1;
+        -:  154:            }
+        -:  155:
+        1:  156:            std::cout << "Bound client to UDS datagram socket at " << client_path << "\n";
+        -:  157:
+        -:  158:            // Schedule automatic cleanup of the client socket file on process exit
+        1:  159:            atexit([]() {
+        1:  160:                unlink(("/tmp/uds_client_" + std::to_string(getpid()) + ".sock").c_str());
+        1:  161:            });
+        -:  162:        }
+        2:  163:    }
+        -:  164:
+        -:  165:    while (true) {
+       40:  166:        std::string input;
+       40:  167:        std::cout << "Enter command: ";
+       40:  168:        std::getline(std::cin, input); // Read command from user
+        -:  169:
+       40:  170:        if (input.empty()) break; // Exit loop if input is empty (user pressed Enter)
+        -:  171:
+       35:  172:        if (transport == "tcp" || transport == "uds_stream") 
+        -:  173:        {
+        -:  174:            // Send the input command to the server
+       19:  175:            send(sock, input.c_str(), input.size(), 0);
+        -:  176:
+        -:  177:            // Receive response
+       19:  178:            int bytes = recv(sock, buffer, BUFFER_SIZE - 1, 0);
+        -:  179:
+      19*:  180:            if (bytes <= 0) break; // Exit if server closed connection or error
+       19:  181:            buffer[bytes] = '\0'; // Null-terminate the response
+        -:  182:
+       19:  183:            std::cout << "Server response:\n" << buffer << "\n"; // Print server response
+        -:  184:        } 
+        -:  185:        else // udp || uds_datagram
+        -:  186:        {
+        -:  187:            // Destination address setup
+        -:  188:            struct sockaddr* send_addr;
+        -:  189:            socklen_t send_len;
+        -:  190:
+       16:  191:            if (transport == "udp")
+        -:  192:            {
+        -:  193:                // For UDP, use address from getaddrinfo()
+        7:  194:                send_addr = (struct sockaddr*)res->ai_addr;
+        7:  195:                send_len = res->ai_addrlen;
+        -:  196:            } 
+        -:  197:            else // uds_datagram
+        -:  198:            {
+        -:  199:                // For UDS datagram, use the server's UNIX socket address
+        9:  200:                send_addr = (struct sockaddr*)&uds_addr;
+        9:  201:                send_len = sizeof(uds_addr);
+        -:  202:            }
+        -:  203:
+       16:  204:            sendto(sock, input.c_str(), input.size(), 0, send_addr, send_len); // Send the message to the server
+        -:  205:
+        -:  206:            // Prepare to receive reply
+        -:  207:            struct sockaddr_storage reply_addr; // Struct to hold the address of the server
+       16:  208:            socklen_t addrlen = sizeof(reply_addr);
+        -:  209:
+       16:  210:            buffer[BUFFER_SIZE] = {0}; // Clear the buffer
+        -:  211:
+        -:  212:            // Receive response from the server
+       16:  213:            int bytes = recvfrom(sock, buffer, BUFFER_SIZE - 1, 0,
+       16:  214:                                (struct sockaddr*)&reply_addr, &addrlen);
+        -:  215:            
+       16:  216:            if (bytes < 0) {
+    #####:  217:                perror("recvfrom failed");
+    #####:  218:                break;
+        -:  219:            }
+        -:  220:
+       16:  221:            buffer[bytes] = '\0'; // Null-terminate the response
+       16:  222:            std::cout << "Server response:\n" << buffer << "\n"; // Print server response
+        -:  223:        }
+       75:  224:    }
+        -:  225:
+        5:  226:    unlink(client_path.c_str()); // Unlink the UDS datagram client socket file if it was created
+        -:  227:
+        -:  228:    // Free dynamically allocated address info for TCP/UDP
+        5:  229:    if (transport == "tcp" || transport == "udp") {
+        3:  230:        freeaddrinfo(res);
+        -:  231:    }
+        -:  232:
+        5:  233:    close(sock); // Close the socket fd
+        -:  234:    
+        5:  235:    return 0;
+        9:  236:}
+
+
+
+Final report:
+
+david@DESKTOP-JIR4E5H:~/OS_EX2/Task_6$ gcov molecule_requester.cpp
+File '/usr/include/c++/13/bits/basic_string.tcc'
+Lines executed:0.00% of 12
+Creating 'basic_string.tcc.gcov'
+
+File '/usr/include/c++/13/bits/stl_iterator_base_types.h'
+Lines executed:0.00% of 1
+Creating 'stl_iterator_base_types.h.gcov'
+
+File '/usr/include/c++/13/bits/stl_iterator_base_funcs.h'
+Lines executed:0.00% of 3
+Creating 'stl_iterator_base_funcs.h.gcov'
+
+File '/usr/include/c++/13/bits/basic_string.h'
+Lines executed:94.44% of 18
+Creating 'basic_string.h.gcov'
+
+File '/usr/include/c++/13/bits/move.h'
+Lines executed:66.67% of 6
+Creating 'move.h.gcov'
+
+File '/usr/include/c++/13/bits/new_allocator.h'
+Lines executed:100.00% of 2
+Creating 'new_allocator.h.gcov'
+
+File '/usr/include/c++/13/bits/char_traits.h'
+Lines executed:24.14% of 29
+Creating 'char_traits.h.gcov'
+
+File '/usr/include/c++/13/bits/charconv.h'
+Lines executed:100.00% of 26
+Creating 'charconv.h.gcov'
+
+File '/usr/include/c++/13/bits/allocator.h'
+Lines executed:100.00% of 2
+Creating 'allocator.h.gcov'
+
+File 'molecule_requester.cpp'
+Lines executed:83.04% of 112
+Creating 'molecule_requester.cpp.gcov'
+
+File '/usr/include/x86_64-linux-gnu/c++/13/bits/c++config.h'
+Lines executed:100.00% of 2
+Creating 'c++config.h.gcov'
+
+Lines executed:71.83% of 213
+david@DESKTOP-JIR4E5H:~/OS_EX2/Task_6$

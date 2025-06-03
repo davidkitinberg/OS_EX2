@@ -172,7 +172,7 @@ std::string process_add_command(const std::string& cmd) {
     unsigned long long amount;
     std::string response;
 
-    // Parse input: expecting ADD <ATOM> <AMOUNT>
+    // Parse input: ADD <ATOM> <AMOUNT>
     iss >> action >> atom;
     if (!(iss >> amount)) {
         return "ERROR: Missing or invalid amount\n";
@@ -210,15 +210,23 @@ std::string handle_deliver(const std::string& cmd) {
 
     std::istringstream iss(cmd);
     std::string action, molecule, part;
-    int count = -1;
+    long long count = -1;
 
-    // Parse input: expecting DELIVER <MOLECULE> <AMOUNT>
+    // Parse input: DELIVER <MOLECULE> <AMOUNT>
     iss >> action;
 
     while (iss >> part) 
     {
-        if (std::all_of(part.begin(), part.end(), ::isdigit)) {
-            count = std::stoi(part);
+        if (std::all_of(part.begin(), part.end(), ::isdigit)) 
+        {
+            try 
+            {
+                count = std::stoll(part);
+            } 
+            catch (const std::exception&) 
+            {
+                return "ERROR: Invalid or out-of-range molecule count\n";
+            }
             break;
         }
         if (!molecule.empty()) molecule += " ";
@@ -236,7 +244,8 @@ std::string handle_deliver(const std::string& cmd) {
     // Try to deduct required atoms for the molecule
     for (const auto& [atom, qty] : molecule_recipes[molecule]) 
     {
-        unsigned long long required = qty * count;
+        unsigned long long required = static_cast<unsigned long long>(qty) * count;
+        
         if (atom_stock[atom] < required) { // If there are'nt enough atoms to make the wanted amount of molecules
             return "ERROR: Not enough atoms to deliver " + molecule + "\n";
         }
@@ -496,7 +505,7 @@ int main(int argc, char* argv[]) {
     // Timeout handling
     if (timeout_seconds > 0) {
     signal(SIGALRM, handle_alarm); // Set handler
-    alarm(timeout_seconds);        // Start initial alarm
+    alarm(timeout_seconds); // Start initial alarm
     }
 
     
@@ -535,7 +544,7 @@ int main(int argc, char* argv[]) {
             perror("Error in select activity");
             continue;
         }
-        if (timeout_seconds > 0) alarm(timeout_seconds);   // reset timeout time
+        if (timeout_seconds > 0) alarm(timeout_seconds); // reset timeout timer
 
 
 

@@ -77,15 +77,23 @@ std::string process_add_command(const std::string& cmd) {
 std::string handle_deliver(const std::string& cmd) {
     std::istringstream iss(cmd);
     std::string action, molecule, part;
-    int count = -1;
+    long long count = -1;
 
     // Parse input: expecting DELIVER <MOLECULE> <AMOUNT>
     iss >> action;
 
     while (iss >> part) 
     {
-        if (std::all_of(part.begin(), part.end(), ::isdigit)) {
-            count = std::stoi(part);
+        if (std::all_of(part.begin(), part.end(), ::isdigit)) 
+        {
+            try 
+            {
+                count = std::stoll(part);
+            } 
+            catch (const std::exception&) 
+            {
+                return "ERROR: Invalid or out-of-range molecule count\n";
+            }
             break;
         }
         if (!molecule.empty()) molecule += " ";
@@ -209,8 +217,8 @@ int main(int argc, char* argv[]) {
         FD_ZERO(&readfds); // Clear and prepare file descriptor set
         FD_SET(tcp_fd, &readfds); // Add TCP fd to the readfds
         FD_SET(udp_fd, &readfds); // Add UDP fd to the readfds
-        FD_SET(STDIN_FILENO, &readfds); // <<< Add console input (keyboard)
-        max_sd = std::max(std::max(tcp_fd, udp_fd), STDIN_FILENO); // <<< Initial max_sd
+        FD_SET(STDIN_FILENO, &readfds); // Add console input (keyboard)
+        max_sd = std::max(std::max(tcp_fd, udp_fd), STDIN_FILENO); // Initial max_sd
 
         // Add active TCP sockets to the fd set
         for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -326,7 +334,7 @@ int main(int argc, char* argv[]) {
                 // Parse and handle UDP command
                 if (cmd.find("DELIVER") == 0) // If the request is DELIVER
                 {
-                    response = handle_deliver(cmd); // Call handle deliver
+                    response = handle_deliver(cmd);
                 } 
                 else if (cmd.find("ADD") == 0) // If the request is ADD
                 {

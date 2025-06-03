@@ -57,11 +57,6 @@ int main(int argc, char* argv[]) {
 
     int port = (tcp_port != -1) ? tcp_port : udp_port;
 
-    // if (!server_host || port == -1 || (transport != "tcp" && transport != "udp")) {
-    //     std::cerr << "Error: Missing or invalid arguments.\n";
-    //     std::cerr << "Usage: " << argv[0] << " -h <host> -p <port> [-t tcp|udp]\n";
-    //     return 1;
-    // }
 
     // Prepare address lookup
     struct addrinfo hints{}, *res;

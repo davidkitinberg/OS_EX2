@@ -9,7 +9,7 @@
 #include <sys/select.h>
 #include <arpa/inet.h>
 
-//#define PORT 12345
+
 #define MAX_CLIENTS 10
 #define BUFFER_SIZE 1024
 
@@ -29,7 +29,7 @@ void handle_command(const std::string& cmd, int client_socket) {
     std::string action, atom;
     unsigned long long amount;
 
-    // Parse input: expecting "ADD <ATOM> <AMOUNT>"
+    // Parse input: "ADD <ATOM> <AMOUNT>"
     iss >> action >> atom;
     if (!(iss >> amount)) {
         response = "ERROR: Missing or invalid amount\n";
@@ -65,7 +65,6 @@ void handle_command(const std::string& cmd, int client_socket) {
 int main(int argc, char* argv[]) {
     int server_fd, new_socket, activity, valread, sd, max_sd;
     struct sockaddr_in address;
-    //int opt = 1;
     int optval = 1;
     int addrlen = sizeof(address);
     char buffer[BUFFER_SIZE];
@@ -108,7 +107,7 @@ int main(int argc, char* argv[]) {
     // Bind socket to address and port
     bind(server_fd, (struct sockaddr*)&address, sizeof(address));
 
-    // Start listening for incoming connections (max 3 in backlog queue)
+    // Start listening for incoming connections
     listen(server_fd, 3);
 
     std::cout << "atom_warehouse started on port " << port << std::endl;

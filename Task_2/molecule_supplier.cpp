@@ -41,7 +41,7 @@ std::string process_add_command(const std::string& cmd) {
     unsigned long long amount;
     std::string response;
 
-    // Parse input: expecting ADD <ATOM> <AMOUNT>
+    // Parse input: ADD <ATOM> <AMOUNT>
     iss >> action >> atom;
     if (!(iss >> amount)) {
         return "ERROR: Missing or invalid amount\n";
@@ -72,15 +72,23 @@ std::string process_add_command(const std::string& cmd) {
 std::string handle_deliver(const std::string& cmd) {
     std::istringstream iss(cmd);
     std::string action, molecule, part;
-    int count = -1;
+    long long count = -1;
 
     // Parse input: expecting DELIVER <MOLECULE> <AMOUNT>
     iss >> action;
 
     while (iss >> part) 
     {
-        if (std::all_of(part.begin(), part.end(), ::isdigit)) {
-            count = std::stoi(part);
+        if (std::all_of(part.begin(), part.end(), ::isdigit)) 
+        {
+            try 
+            {
+                count = std::stoll(part);
+            } 
+            catch (const std::exception&) 
+            {
+                return "ERROR: Invalid or out-of-range molecule count\n";
+            }
             break;
         }
         if (!molecule.empty()) molecule += " ";
